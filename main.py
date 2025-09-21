@@ -18,7 +18,7 @@ from tools import (
 from agent import agent, memory_saver
 
 # Config / secrets
-SECRET_KEY = os.getenv("SECRET_KEY", "ReplaceWithYourSecretKey")
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "12"))
 
