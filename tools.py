@@ -1,8 +1,7 @@
 # tools.py
-from agents import function_tool
-from db import get_student_collection, get_admin_collection, hash_password, verify_password
+from langchain_core.tools import tool
+from db import get_student_collection, get_admin_collection
 from typing import Dict, Any, List
-import uuid
 import datetime
 
 students = get_student_collection()
@@ -11,11 +10,11 @@ admins = get_admin_collection()
 # ----------------------------
 # Student Management (Admin-managed)
 # ----------------------------
-@function_tool
+@tool
 def add_student(name: str, student_id: int, department: str, email: str) -> Dict[str, Any]:
     """
     Add student (email must be unique). Returns inserted student doc or error.
-    Signature matches your requested: add_student(name, id, department, email)
+    Signature: add_student(name, student_id, department, email)
     """
     email = email.lower().strip()
     if students.find_one({"email": email}):
@@ -31,18 +30,15 @@ def add_student(name: str, student_id: int, department: str, email: str) -> Dict
     student["_id"] = str(result.inserted_id)
     return {"message": "Student added successfully", "student": student}
 
-
-@function_tool
+@tool
 def get_student(identifier: str) -> Dict[str, Any]:
     """
     Get student by email OR by student_id (identifier passed as string).
-    The agent can call get_student('anas@gmail.com') or get_student('123').
+    Example: get_student('anas@gmail.com') or get_student('123')
     """
-    # first try email
     identifier = identifier.strip()
     student = students.find_one({"email": identifier.lower()})
     if not student:
-        # try numeric student_id
         try:
             sid = int(identifier)
             student = students.find_one({"student_id": sid})
@@ -53,19 +49,16 @@ def get_student(identifier: str) -> Dict[str, Any]:
     student["_id"] = str(student["_id"])
     return student
 
-
-@function_tool
+@tool
 def update_student(identifier: str, field: str, new_value: str) -> Dict[str, Any]:
     """
     Update student by email or student_id.
-    field allowed: name, department, email, student_id
-    If field == 'email', ensure new email doesn't already exist.
+    Allowed fields: name, department, email, student_id
+    If field is 'email', ensure new email doesn't already exist.
     """
     identifier = identifier.strip()
-    # resolve query
     query = {"email": identifier.lower()}
     if students.find_one(query) is None:
-        # try student_id
         try:
             sid = int(identifier)
             query = {"student_id": sid}
@@ -89,12 +82,11 @@ def update_student(identifier: str, field: str, new_value: str) -> Dict[str, Any
     result = students.update_one(query, {"$set": {field: new_value}})
     if result.matched_count == 0:
         return {"error": "Student not found"}
-    student = students.find_one(query if field != "email" else {"email": new_value if field == "email" else query.get("email")})
+    student = students.find_one(query if field != "email" else {"email": new_value})
     student["_id"] = str(student["_id"])
     return {"message": "Student updated successfully", "student": student}
 
-
-@function_tool
+@tool
 def delete_student(identifier: str) -> Dict[str, Any]:
     """
     Delete student by email or student_id.
@@ -113,9 +105,11 @@ def delete_student(identifier: str) -> Dict[str, Any]:
         return {"error": "Student not found"}
     return {"message": f"Student deleted successfully"}
 
-
-@function_tool
+@tool
 def list_students() -> Dict[str, Any]:
+    """
+    List all students, sorted by creation date (newest first).
+    """
     result = list(students.find().sort("created_at", -1))
     out = []
     for s in result:
@@ -123,23 +117,29 @@ def list_students() -> Dict[str, Any]:
         out.append(s)
     return {"students": out}
 
-
 # ----------------------------
 # Analytics
 # ----------------------------
-@function_tool
+@tool
 def get_total_students() -> Dict[str, Any]:
+    """
+    Get the total number of students.
+    """
     return {"total_students": students.count_documents({})}
 
-
-@function_tool
+@tool
 def get_students_by_department() -> Dict[str, Any]:
+    """
+    Get the count of students by department.
+    """
     pipeline = [{"$group": {"_id": "$department", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}]
     return {"students_by_department": list(students.aggregate(pipeline))}
 
-
-@function_tool
+@tool
 def get_recent_onboarded_students(limit: int = 5) -> Dict[str, Any]:
+    """
+    Get recently onboarded students, sorted by creation date.
+    """
     limit = int(limit)
     cursor = students.find().sort("created_at", -1).limit(limit)
     out = []
@@ -148,11 +148,10 @@ def get_recent_onboarded_students(limit: int = 5) -> Dict[str, Any]:
         out.append(s)
     return {"recent_students": out}
 
-
-@function_tool
+@tool
 def get_active_students_last_7_days() -> Dict[str, Any]:
     """
-    Mocked active list. You can integrate real activity logs and query them here.
+    Mocked active list. Returns a limited list of students as a mock.
     """
     cursor = students.find().limit(3)
     out = []
@@ -161,22 +160,28 @@ def get_active_students_last_7_days() -> Dict[str, Any]:
         out.append(s)
     return {"active_last_7_days": out}
 
-
 # ----------------------------
 # FAQ / Events
 # ----------------------------
-@function_tool
+@tool
 def get_cafeteria_timings() -> Dict[str, Any]:
+    """
+    Get cafeteria timings.
+    """
     return {"cafeteria_timings": "Mon-Fri 8am-8pm, Sat-Sun 9am-5pm"}
 
-
-@function_tool
+@tool
 def get_library_hours() -> Dict[str, Any]:
+    """
+    Get library hours.
+    """
     return {"library_hours": "Mon-Fri 9am-10pm, Sat 9am-6pm, Sun Closed"}
 
-
-@function_tool
+@tool
 def get_event_schedule() -> Dict[str, Any]:
+    """
+    Get the event schedule.
+    """
     return {
         "events": [
             {"title": "Orientation", "date": "Sept 25"},
@@ -185,13 +190,14 @@ def get_event_schedule() -> Dict[str, Any]:
         ]
     }
 
-
 # ----------------------------
 # Notifications (mock)
 # ----------------------------
-@function_tool
+@tool
 def send_email(student_identifier: str, message: str) -> Dict[str, Any]:
-    # resolve student
+    """
+    Mock sending an email to a student by email or student_id.
+    """
     student = None
     student_identifier = student_identifier.strip()
     student = students.find_one({"email": student_identifier.lower()})
@@ -204,6 +210,5 @@ def send_email(student_identifier: str, message: str) -> Dict[str, Any]:
 
     if not student:
         return {"error": "Student not found"}
-    # mock send
     print(f"[EMAIL MOCK] to={student['email']} message={message}")
     return {"message": f"Email mock sent to {student['email']}"}

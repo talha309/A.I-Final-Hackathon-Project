@@ -1,12 +1,10 @@
-# main.py
 import os
+import datetime
+import jwt
 from fastapi import FastAPI, Depends, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import StreamingResponse
-import jwt
-import datetime
-from agents import Runner
 
 from db import get_admin_collection, hash_password, verify_password
 from tools import (
@@ -16,8 +14,10 @@ from tools import (
     get_event_schedule, send_email
 )
 from agent import agent, memory_saver
-
+from langchain_google_genai import ChatGoogleGenerativeAI
+# ----------------------------
 # Config / secrets
+# ----------------------------
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = int(os.getenv("ACCESS_TOKEN_EXPIRE_HOURS", "12"))
@@ -26,7 +26,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="admin/login")
 
 app = FastAPI(title="Campus Admin Agent")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
+llm = ChatGoogleGenerativeAI( model="gemini-1.5-flash", google_api_key=os.getenv("GEMINI_API_KEY"))
 
 # ----------------------------
 # Admin Signup & Login (JWT)
@@ -38,8 +38,13 @@ def admin_signup(email: str = Body(...), password: str = Body(...), name: str = 
     if admins.find_one({"email": email}):
         raise HTTPException(status_code=400, detail=f"Admin with email {email} already exists")
     hashed = hash_password(password)
-    admin = {"email": email, "password": hashed, "name": name or "", "created_at": datetime.datetime.utcnow(), "verified": True}
-    # NOTE: For now, set verified True for admin signup. If you want verification, modify flow.
+    admin = {
+        "email": email,
+        "password": hashed,
+        "name": name or "",
+        "created_at": datetime.datetime.utcnow(),
+        "verified": True
+    }
     admins.insert_one(admin)
     return {"message": "Admin created successfully", "admin": {"email": email, "name": name}}
 
@@ -52,7 +57,7 @@ def admin_login(form_data: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not verify_password(form_data.password, admin["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    # build JWT
+
     expire = datetime.datetime.utcnow() + datetime.timedelta(hours=ACCESS_TOKEN_EXPIRE_HOURS)
     payload = {"sub": admin["email"], "exp": expire}
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
@@ -68,7 +73,6 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
         email = payload.get("sub")
         if not email:
             raise HTTPException(status_code=401, detail="Invalid token")
-        # optional: verify admin still exists
         admins = get_admin_collection()
         if admins.find_one({"email": email}) is None:
             raise HTTPException(status_code=401, detail="Invalid admin")
@@ -85,13 +89,19 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
 @app.get("/chat")
 async def chat_agent(q: str = Query(...), admin: str = Depends(get_current_admin)):
     """
-    Run the agent for a single admin query. The agent can call function tools and update DB.
-    Memory is persisted via memory_saver (LangGraph MongoDBSaver) passed as checkpoint.
+    Normal chat endpoint. Memory is persisted via LangGraph MongoDBSaver.
+    Each admin has their own thread_id (email-based).
     """
-    # Runner.run returns a result object containing final_output and other details
-    result = await Runner.run(agent, q, checkpoint=memory_saver)
-    # result.final_output may be rich - return it directly
-    return {"response": getattr(result, "final_output", result)}
+    try:
+        if not q.strip():
+            raise HTTPException(status_code=400, detail="Query cannot be empty")
+        config = {"configurable": {"thread_id": admin}}
+        result = await agent.invoke({"messages": [HumanMessage(content=q)]}, config, checkpoint=memory_saver)
+        if not result["messages"] or not isinstance(result["messages"][-1], AIMessage):
+            raise HTTPException(status_code=500, detail="Invalid response from agent")
+        return {"response": result["messages"][-1].content}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
 
 
 # ----------------------------
@@ -100,15 +110,19 @@ async def chat_agent(q: str = Query(...), admin: str = Depends(get_current_admin
 @app.get("/chat/stream")
 async def chat_agent_stream(q: str = Query(...), admin: str = Depends(get_current_admin)):
     """
-    Stream tokens as SSE using Runner.stream(...) with checkpoint=memory_saver.
-    Each yielded chunk is an atomic token/content as produced by the model.
+    Stream tokens as SSE using LangGraph agent.astream with checkpoint=memory_saver.
     """
     async def event_generator():
         try:
-            async for token in Runner.stream(agent, q, checkpoint=memory_saver):
-                # token might be dict/str depending on SDK - convert to string
-                data = token if isinstance(token, str) else str(token)
-                yield f"data: {data}\n\n"
+            config = {"configurable": {"thread_id": admin}}
+            async for event in agent.astream({"messages": [("user", q)]}, config, checkpoint=memory_saver):
+                if isinstance(event, dict):
+                    # stream partial message content
+                    chunk = event.get("messages", [{}])[-1].get("content")
+                else:
+                    chunk = str(event)
+                if chunk:
+                    yield f"data: {chunk}\n\n"
         except Exception as e:
             yield f"data: [STREAM ERROR] {str(e)}\n\n"
 
@@ -120,16 +134,6 @@ async def chat_agent_stream(q: str = Query(...), admin: str = Depends(get_curren
 # ----------------------------
 @app.post("/students")
 def api_add_student(payload: dict = Body(...), admin: str = Depends(get_current_admin)):
-    """
-    payload example:
-    {
-      "name":"Anas",
-      "student_id": 1,
-      "department":"BS SE",
-      "email":"anas@gmail.com"
-    }
-    """
-    # validate keys minimally
     for k in ("name", "student_id", "department", "email"):
         if k not in payload:
             raise HTTPException(status_code=400, detail=f"Missing field: {k}")
@@ -141,9 +145,6 @@ def api_add_student(payload: dict = Body(...), admin: str = Depends(get_current_
 
 @app.get("/students")
 def api_get_student(email: str = Query(None), student_id: str = Query(None), admin: str = Depends(get_current_admin)):
-    """
-    For compatibility: prefer email; if email omitted, use student_id.
-    """
     if email:
         result = get_student(email)
     elif student_id:
@@ -157,10 +158,6 @@ def api_get_student(email: str = Query(None), student_id: str = Query(None), adm
 
 @app.put("/students")
 def api_update_student(identifier: str = Query(...), update: dict = Body(...), admin: str = Depends(get_current_admin)):
-    """
-    identifier: email or student_id string
-    update: {"field":"department","new_value":"BS CS"}
-    """
     if "field" not in update or "new_value" not in update:
         raise HTTPException(status_code=400, detail="update must contain 'field' and 'new_value'")
     result = update_student(identifier, update["field"], update["new_value"])
@@ -221,6 +218,8 @@ def api_library(admin: str = Depends(get_current_admin)):
 @app.get("/faq/events")
 def api_events(admin: str = Depends(get_current_admin)):
     return get_event_schedule()
+
+
 @app.get("/")
 def route():
-    return ("Welcome to studentAPI")
+    return "Welcome to studentAPI"
