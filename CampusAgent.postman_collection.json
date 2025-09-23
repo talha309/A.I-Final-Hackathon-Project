@@ -38,7 +38,7 @@
                   "   console.log('✅ Token saved:', data.access_token);",
                   "}"
                 ],
-                "type": "text/javascript"
+                "type": "text"
               }
             }
           ],
