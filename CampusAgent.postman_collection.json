@@ -71,7 +71,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"name\": \"Talha\",\n  \"email\": \"talha@gmail.com\",\n  \"department\": \"CS\"\n}"
+              "raw": "{\n  \"name\": \"josw\",\n  \"email\": \"jose@gmail.com\",\n  \"department\": \"CS\"\n}"
             },
             "url": "{{baseUrl}}/students"
           }

@@ -1,3 +1,4 @@
+# main.py
 import os
 import datetime
 import jwt
@@ -5,7 +6,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import StreamingResponse
-
+from langchain_core.messages import HumanMessage  # Added import
 from db import get_admin_collection, hash_password, verify_password
 from tools import (
     add_student, get_student, update_student, delete_student, list_students,
@@ -15,6 +16,7 @@ from tools import (
 )
 from agent import agent, memory_saver
 from langchain_google_genai import ChatGoogleGenerativeAI
+
 # ----------------------------
 # Config / secrets
 # ----------------------------
@@ -26,7 +28,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="admin/login")
 
 app = FastAPI(title="Campus Admin Agent")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-llm = ChatGoogleGenerativeAI( model="gemini-1.5-flash", google_api_key=os.getenv("GEMINI_API_KEY"))
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.getenv("GEMINI_API_KEY"))
 
 # ----------------------------
 # Admin Signup & Login (JWT)
@@ -48,7 +50,6 @@ def admin_signup(email: str = Body(...), password: str = Body(...), name: str = 
     admins.insert_one(admin)
     return {"message": "Admin created successfully", "admin": {"email": email, "name": name}}
 
-
 @app.post("/admin/login")
 def admin_login(form_data: OAuth2PasswordRequestForm = Depends()):
     admins = get_admin_collection()
@@ -62,7 +63,6 @@ def admin_login(form_data: OAuth2PasswordRequestForm = Depends()):
     payload = {"sub": admin["email"], "exp": expire}
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     return {"access_token": token, "token_type": "bearer"}
-
 
 # ----------------------------
 # JWT dependency
@@ -82,7 +82,6 @@ def get_current_admin(token: str = Depends(oauth2_scheme)):
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-
 # ----------------------------
 # Chat endpoint (sync)
 # ----------------------------
@@ -97,12 +96,11 @@ async def chat_agent(q: str = Query(...), admin: str = Depends(get_current_admin
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         config = {"configurable": {"thread_id": admin}}
         result = await agent.invoke({"messages": [HumanMessage(content=q)]}, config, checkpoint=memory_saver)
-        if not result["messages"] or not isinstance(result["messages"][-1], AIMessage):
+        if not result.get("messages") or not isinstance(result["messages"][-1], AIMessage):
             raise HTTPException(status_code=500, detail="Invalid response from agent")
         return {"response": result["messages"][-1].content}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Chat error: {str(e)}")
-
 
 # ----------------------------
 # Chat stream (SSE)
@@ -115,10 +113,9 @@ async def chat_agent_stream(q: str = Query(...), admin: str = Depends(get_curren
     async def event_generator():
         try:
             config = {"configurable": {"thread_id": admin}}
-            async for event in agent.astream({"messages": [("user", q)]}, config, checkpoint=memory_saver):
-                if isinstance(event, dict):
-                    # stream partial message content
-                    chunk = event.get("messages", [{}])[-1].get("content")
+            async for event in agent.astream({"messages": [HumanMessage(content=q)]}, config, checkpoint=memory_saver):
+                if isinstance(event, dict) and "messages" in event:
+                    chunk = event["messages"][-1].content if event["messages"] else ""
                 else:
                     chunk = str(event)
                 if chunk:
@@ -127,7 +124,6 @@ async def chat_agent_stream(q: str = Query(...), admin: str = Depends(get_curren
             yield f"data: [STREAM ERROR] {str(e)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
 
 # ----------------------------
 # Students REST (admin-protected)
@@ -142,7 +138,6 @@ def api_add_student(payload: dict = Body(...), admin: str = Depends(get_current_
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
-
 @app.get("/students")
 def api_get_student(email: str = Query(None), student_id: str = Query(None), admin: str = Depends(get_current_admin)):
     if email:
@@ -155,7 +150,6 @@ def api_get_student(email: str = Query(None), student_id: str = Query(None), adm
         raise HTTPException(status_code=404, detail=result["error"])
     return result
 
-
 @app.put("/students")
 def api_update_student(identifier: str = Query(...), update: dict = Body(...), admin: str = Depends(get_current_admin)):
     if "field" not in update or "new_value" not in update:
@@ -165,7 +159,6 @@ def api_update_student(identifier: str = Query(...), update: dict = Body(...), a
         raise HTTPException(status_code=400, detail=result["error"])
     return result
 
-
 @app.delete("/students")
 def api_delete_student(identifier: str = Query(...), admin: str = Depends(get_current_admin)):
     result = delete_student(identifier)
@@ -173,11 +166,9 @@ def api_delete_student(identifier: str = Query(...), admin: str = Depends(get_cu
         raise HTTPException(status_code=404, detail=result["error"])
     return result
 
-
 @app.get("/students/list")
 def api_list_students(admin: str = Depends(get_current_admin)):
     return list_students()
-
 
 # ----------------------------
 # Analytics endpoints
@@ -186,21 +177,17 @@ def api_list_students(admin: str = Depends(get_current_admin)):
 def api_total_students(admin: str = Depends(get_current_admin)):
     return get_total_students()
 
-
 @app.get("/analytics/by-department")
 def api_students_by_department(admin: str = Depends(get_current_admin)):
     return get_students_by_department()
-
 
 @app.get("/analytics/recent")
 def api_recent_students(limit: int = 5, admin: str = Depends(get_current_admin)):
     return get_recent_onboarded_students(limit)
 
-
 @app.get("/analytics/active")
 def api_active_last_7_days(admin: str = Depends(get_current_admin)):
     return get_active_students_last_7_days()
-
 
 # ----------------------------
 # FAQ & Events
@@ -209,17 +196,15 @@ def api_active_last_7_days(admin: str = Depends(get_current_admin)):
 def api_cafeteria(admin: str = Depends(get_current_admin)):
     return get_cafeteria_timings()
 
-
 @app.get("/faq/library")
 def api_library(admin: str = Depends(get_current_admin)):
     return get_library_hours()
-
 
 @app.get("/faq/events")
 def api_events(admin: str = Depends(get_current_admin)):
     return get_event_schedule()
 
-
 @app.get("/")
 def route():
     return "Welcome to studentAPI"
+
